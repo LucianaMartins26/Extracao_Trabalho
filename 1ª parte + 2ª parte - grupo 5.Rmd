@@ -1,0 +1,434 @@
+---
+title: "Grupo 5 - Trabalho prático de Extração de Conhecimento de Bases de Dados Biológicas"
+author: "Ana Lisboa(pg49831), Angelina Eiras(pg42861), Bruna Almeida(pg51187), Luciana Martins(pg49839)"
+date: "2023-06-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Explicação dos dados, a sua origem e relevância 
+
+Os dados escolhidos pelo nosso grupo são provenientes do estudo Skin Cutaneous Melanoma, assumindo o id TCGA-SKCM (The Cancer Genome Atlas-Skin Cutaneous Melanoma), na base de dados National Cancer Institute (GCD Data Portal). O dataset foi obtido através do link: https://portal.gdc.cancer.gov/projects/TCGA-SKCM.
+
+Este conjunto de dados é referente à expressão genómica e perfil molecular de pacientes com melanoma cutâneo contendo informações sobre mais de 400 amostras de tecido de pacientes, incluindo informações clínicas, genómicas e de expressão génica. As amostras foram recolhidas em diferentes locais do corpo e, posteriormente, analisadas para identificar mutações genéticas, alterações no RNA, metilação do DNA e outras características moleculares.
+
+O melanoma cutâneo é causado pela exposição excessiva aos raios ultravioleta do sol e ao bronzeamento artificial, que provocam alterações nos melanócitos, as células produtoras de pigmento da pele. 
+
+O projeto tem como objetivo entender melhor as causas do melanoma cutâneo e identificar potenciais alvos terapêuticos, demonstrando como a análise genómica pode ser usada para avançar na compreensão do cancro e ajudar a desenvolver tratamentos mais eficazes.
+
+
+## Obtenção de packages do BioConductor
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+if (!requireNamespace("rpart.plot", quietly = TRUE))
+  install.packages("rpart.plot")
+
+if (!requireNamespace("org.Hs.eg.db", quietly = TRUE))
+  BiocManager::install("org.Hs.eg.db")
+
+if (!requireNamespace("TCGAbiolinks", quietly = TRUE))
+  BiocManager::install("TCGAbiolinks")
+
+if (!requireNamespace("MultiAssayExperiment", quietly = TRUE))
+  BiocManager::install("MultiAssayExperiment")
+
+if (!requireNamespace("DESeq2", quietly = TRUE))
+  BiocManager::install("DESeq2")
+
+if (!requireNamespace("limma", quietly = TRUE))
+  BiocManager::install("limma")
+```
+
+
+## Carregamento de packages
+```{r}
+library(MultiAssayExperiment)
+library(TCGAbiolinks)
+library(limma)
+library(DESeq2)
+library(org.Hs.eg.db)
+library(rpart)
+library(rpart.plot)
+library(class)
+library(caret)
+library(glmnet)
+```
+
+
+## Obtenção dos dados 
+Começamos por retirar os dados a partir do package TCGAbiolinks e guardamos o ficheiro para ser mais fácil a sua utilização, posteriormente.
+```{r}
+proj <- "TCGA-SKCM" 
+#query <- GDCquery(project = proj, data.category = "Transcriptome Profiling",  data.type = "Gene Expression Quantification", workflow.type = "STAR - Counts")
+
+#if (!file.exists("TCGA_SKCM")) {GDCdownload(query, directory = "TCGA_SKCM", files.per.chunk = 5)}
+
+#data_rna_SKCM <- GDCprepare(query, save = TRUE, save.filename = "TCGA_SKCM.rda")
+
+query <- GDCquery(project = proj, data.category = "Transcriptome Profiling", data.type = "Gene Expression Quantification", workflow.type = "STAR - Counts")
+GDCdownload(query)
+data_rna_SKCM <- GDCprepare(query, save = TRUE, save.filename = "TCGA_SKCM.rda")
+```
+
+```{r}
+load("TCGA_SKCM.rda") 
+
+class(data_rna_SKCM)
+dim(data_rna_SKCM)
+
+```
+
+
+## Exploração dos Metadados
+De seguida realizamos a exploração dos metadados, que consistem nos dados clínicos, contendo informação, como o sexo, ano de diagnóstico, o tipo de células tumorais, entre outros. 
+```{r}
+#metadados
+metadata <- colData(data_rna_SKCM)
+dim(metadata)
+colnames(metadata)
+
+barplot(table(metadata$gender)) 
+```
+```{r}
+barplot(table(metadata$year_of_diagnosis)) 
+```
+
+```{r}
+barplot(table(metadata$sample_type)) 
+```
+
+```{r}
+boxplot(metadata$age_at_index)
+```
+
+```{r}
+contagens <- table(metadata$sample_type, metadata$age_at_index)
+nomes <- c( "Additional Metastatic", "Metastatic", "Primary Tumor", "Solid Tissue Normal")
+barplot(contagens, xlab="Tipos de cancro" ,col=c("deepskyblue","firebrick2", "gray"), beside=TRUE) 
+legend("topleft", legend = nomes, cex = 0.8, bty="n", fill = c("deepskyblue","firebrick2", "gray"))
+```
+
+
+# Sexo vs Metastatic/Primary Tumor - tabela cruzada sem considerar as restantes duas categorias de sample_type.
+```{r}
+h_m <- sum(metadata$gender=="male" & metadata$sample_type=="Metastatic")
+h_p <- sum(metadata$gender=="male" & metadata$sample_type=="Primary Tumor")
+m_m <- sum(metadata$gender=="female" & metadata$sample_type=="Metastatic")
+m_p <- sum(metadata$gender=="female" & metadata$sample_type=="Primary Tumor")
+
+dados_tabela_cruzada <- matrix(c(h_m,h_p, m_m,m_p), nrow = 2, ncol = 2, byrow = TRUE, dimnames = list(c("Homem", "Mulher"), c("Metastatic", "Primary Tumor")))
+chisq.test(dados_tabela_cruzada) 
+```
+A partir dos barplots realizados inicialmente, concluiu-se que a maior parte dos pacientes são do sexo masculino, de seguida conseguimos perceber que estes foram mais diagnosticados a partir dos anos 2000, com maior incidência em 2012, possívelmente, devido ao avanço da tecnologia. Também podemos verificar que a grande maioria dos nossos dados são do tipo "Metastatic" seguido de "Primary Tumor". 
+Recorrendo aos dados sample_type e age_at_index, relacionamos a idade e o tipo de amostra.
+Por último, foi relacionado o sexo com apenas dois tipos de amostra, onde se realizou o Chi-squared test e averiguamos que o p_value é maior que 0.05, assim, não podemos rejeitar a hipótese nula pelo que, não há evidência de que as variáveis estejam relacionadas.
+
+
+## Exploração dos Metadados 2
+```{r}
+rowData(data_rna_SKCM)
+names(rowData(data_rna_SKCM))
+gene_type <- rowData(data_rna_SKCM)$gene_type
+barplot(table(gene_type), main="Distribuição da Variável 'Type'", xlab="Tipo", ylab="Contagem")
+```
+
+```{r}
+table(rowData(data_rna_SKCM)$source)
+barplot(table(rowData(data_rna_SKCM)$source)) 
+```
+
+```{r}
+table(rowData(data_rna_SKCM)$type)
+barplot(table(rowData(data_rna_SKCM)$type)) 
+``` 
+
+Relativamente à análise dos restantes metadados conseguimos observar no primeiro gráfico que há uma maior incidência da variável do tipo protein_coding e MiRNA. Também foi possível concluir que os nossos dados foram maioritariamente retirados da base de dados HAVANA e que são todos genes. 
+
+
+## Aplicação do package DESEQ2 
+Retornando à análise dos dados data_rna_SKCM efetuamos primeiramente aplicação do package DESEQ2 que nos permite distinguir genes diferencialmente expressos. 
+```{r}
+data_de <- data_rna_SKCM[,!is.na(data_rna_SKCM$paper_IDH1_mut)]
+
+ddsSE <- DESeqDataSet(data_de, design = ~ paper_IDH1_mut)
+
+keep <- rowSums(counts(ddsSE)) >= 10
+ddsSE <- ddsSE[keep,]
+ddsSE_2 <- DESeq(ddsSE)
+counts_ddsSE_2 <- counts(ddsSE_2)
+
+design_ddsSE_2 <- colData(ddsSE_2)
+sizeFactors_ddsSE_2 <- sizeFactors(ddsSE_2)
+
+resultsNames(ddsSE_2)
+
+res <- results(ddsSE_2, name = "paper_IDH1_mut_wt_vs_.")
+df <- as.data.frame(res)
+summary(res)
+
+DESeq2::plotMA(res, main = "Expressão Diferencial", ylm = c(-2,2)) 
+``` 
+Através do plot do package DESEQ2, podemos concluir que a maior parte dos nossos genes estão sobre expressos com contagens entre 1 e 1000, contendo também genes sub expressos pelo mesmo número de contagens.
+
+
+## Pré-processamento dos dados de expressão genética
+Através dos counts_ddsSE_2, foi efetuado o pré-processamento dos dados, como também a filtragem e a normalização destes. 
+```{r}
+data_df <- as.data.frame(counts_ddsSE_2)
+not_na <- complete.cases(data_df)
+data_filtered <- counts_ddsSE_2[not_na,]
+data_matrix <- as.matrix(assay(data_filtered))
+
+data_norm <- scale(data_matrix)
+
+head(data_norm)
+```
+
+
+## Análise descritiva 
+Nesta fase, de modo a proceder à análise descritiva efetuamos gráficos dos dados normalizados para melhor interpretação. 
+```{r}
+summary(data_norm)
+
+subset_data <- data_norm[1:4,] 
+summary(subset_data)
+
+
+boxplot(subset_data) 
+```
+Para esta análise, escolhemos apenas algumas colunas para melhor visualização. Realizamos o boxplot que representa os dados de expressão de cada gene em cada paciente, dados estes normalizados o que nos permite também uma melhor visualização e ter os dados mais alinhados pela mediana.
+
+```{r}
+heatmap(subset_data) 
+```
+Ao realizar o heatmap com apenas algumas colunas de genes conseguimos verificar em que pacientes é que alguns se expressam mais e outros menos. A partir deste gráfico uma clusterização é automaticamente feita e podemos verificar do lado esquerdo a clusterização de genes e no topo a dos pacientes, sendo unidos em clusters por semelhança.
+
+```{r}
+subset_data_2 <- data_norm[1:10, 1:10]
+
+pca <- prcomp(subset_data_2, center = TRUE, scale. = TRUE)
+biplot(pca)
+``` 
+Apenas com os dados escolhidos para fazer o pca percebemos que existem alguns outliers como os genes "ENSG000000000938.13" e "ENSG00000000971.16" para este grupo de pacientes. É possível analisar um aglumerado de pacientes associados a genes como "ENSG00000000419.13".
+
+
+```{r}
+plot(density(subset_data)) 
+```
+Verificamos a presença de outliers pela longa cauda do gráfico no lado direito. Devido ao que foi referido e pela não simetria do gráfico (embora em boca de sino) este conjunto de dados pode não ser considerado 100% normalizado. 
+
+
+## Análise de enriquecimento 
+```{r}
+get_entrez <- function(x){unlist(strsplit(x, split="[.]+"))[2]}
+
+enr <- select(org.Hs.eg.db,keys=sapply(rownames(res), get_entrez),columns=c("ENTREZID","SYMBOL","GENENAME"))
+head(enr)
+
+res_2 <- cbind(res, enr)
+head(res_2)
+```
+
+O enriquecimento é um processo que visa aumentar a quantidade e a qualidade de informações de um conjunto de dados. Neste caso, conseguimos adicionar três colunas aos dados originais, ENTREZID, SYMBOL e GENENAME. 
+
+
+## CLUSTERING HIERARQUICO
+```{r}
+subset <- data_norm[1:20, 1:20]
+
+distxy <- dist(subset, method = "euclidean")
+hc = hclust(distxy)
+plot(hc) 
+
+```
+Visualização de um clustering hierarquico com base no subset criado.
+
+
+# CLUSTERING HIERARQUICO c/TRANSPOSTA
+```{r}
+transpose <- t(data_norm)
+subset <- transpose[1:20, 1:20]
+
+distxy <- dist(subset, method = "euclidean")
+hc = hclust(distxy)
+plot(hc)
+```
+Visualização de um clustering hierarquico com base no subset criado.
+
+
+## CLUSTERING K-MEANS
+```{r}
+subset <- data_norm[1:20, 1:20]
+
+wss = c()
+for (k in 2:15) wss = c(wss, sum(kmeans(subset, centers=k)$withinss) )
+plot(2:15, wss, type="b", xlab="Num Clusters", ylab="WSS") 
+
+clust_res = kmeans(subset, 2)
+clust_res$cluster
+```
+O ponto de "cotovelo" é o ponto no gráfico onde a adição de mais clusters não resulta em uma redução significativa na variância explicada. Neste caso será o 3, sendo que a partir desse ponto, adicionar mais clusters provavelmente não fornecerá um ganho significativo no agrupamento dos dados.
+
+
+## CLUSTERING K-MEANS c/TRANSPOSTA
+```{r}
+transpose <- t(data_norm)
+subset <- transpose[1:20, 1:20]
+
+wss = c()
+for (k in 2:15) wss = c(wss, sum(kmeans(subset, centers=k)$withinss) )
+plot(2:15, wss, type="b", xlab="Num Clusters", ylab="WSS") 
+
+clust_res = kmeans(subset, 2)
+clust_res$cluster
+```
+O ponto de "cotovelo" é o ponto no gráfico onde a adição de mais clusters não resulta em uma redução significativa na variância explicada. Neste caso será o 7, sendo que a partir desse ponto, adicionar mais clusters provavelmente não fornecerá um ganho significativo no agrupamento dos dados.
+
+
+## PCA
+```{r}
+subset <- data_norm[1:20, 1:20]
+
+pcares <- prcomp(subset, scale = T)
+summary(pcares) #importancias da componentes
+
+pcares2 <- princomp(scale(subset))
+summary(pcares2) #importancias da componentes
+plot(pcares2)
+pcares2$loadings #loadings
+biplot(pcares2)
+
+svdres= svd(scale(subset))
+svdres$v #as colunas de v são equivalentes aos loadings resultantes da PCA
+
+plot(pcares$rotation[,1], svdres$v[,1], pch=19, xlab="PC1", ylab="SV1-dir") #as colunas de v são equivalentes aos loadings resultantes da PCA
+
+min(which(summary(pcares)$importance[3,]>0.9)) #número minimo de componentes para explicar 90% da variabilidade do modelo
+
+```
+
+
+#PCA c/TRANSPOSTA
+```{r}
+transpose <- t(data_norm)
+subset <- transpose[1:20, 1:20]
+
+pcares <- prcomp(subset, scale = T)
+summary(pcares)  #importancias da componentes
+
+pcares2 <- princomp(scale(subset))
+summary(pcares2)  #importancias da componentes
+plot(pcares2)
+pcares2$loadings #loadings
+biplot(pcares2)
+
+svdres= svd(scale(subset))
+svdres$v #as colunas de v são equivalentes aos loadings resultantes da PCA
+
+plot(pcares$rotation[,1], svdres$v[,1], pch=19, xlab="PC1", ylab="SV1-dir") #as colunas de v são equivalentes aos loadings resultantes da PCA
+
+min(which(summary(pcares)$importance[3,]>0.9)) 
+```
+
+
+## ANÁLISE PREDITIVA
+```{r}
+transpose_subset <- transpose[row.names(transpose) %in% row.names(metadata), ]
+subset_genes <- rownames(transpose_subset)
+metadata_subset <- metadata[subset_genes, ]
+rownames(metadata_subset)
+```
+Aqui igualamos as linhas do dataset da transposta com o do metadata.
+
+```{r}
+transpose_subset_df <- as.data.frame(transpose_subset)
+metadata_subset_df <- data.frame(coluna = metadata_subset$vital_status, stringsAsFactors = FALSE)
+res_df <- data.frame(transpose_subset_df, metadata_subset_df)
+
+```
+De seguida juntamos a coluna viral_status (Alive or Dead) dos metadados ao dataset da transposta.
+
+
+```{r}
+set.seed(12345)
+ind = sample(2, nrow(res_df), replace=TRUE, prob=c(0.7, 0.3))
+trainData = res_df[ind==1,]
+testData = res_df[ind==2,]
+table(trainData$coluna)
+table(testData$coluna)
+```
+
+
+## Método dos k vizinhos mais próximos
+```{r}
+knn_pred = knn(trainData[,1:4], testData[,1:4], trainData$coluna)
+knn_pred #resultado: valores previstos para a variável de saída
+
+
+pecc = function(obs,pred)sum(obs==pred)/length(obs)
+t = table(knn_pred, testData$coluna)
+t
+pecc(knn_pred, testData$coluna) #medidas de erro kNN
+```
+
+
+## TREINO DO MODELO
+```{r}
+trainMatrix <- as.matrix(trainData[, 1:4])
+trainLabel <- trainData$coluna
+
+testMatrix <- as.matrix(testData[, 1:4])
+testLabel <- testData$coluna
+
+```
+
+
+### Estimativa do modelo
+```{r}
+logitModel <- glmnet(trainMatrix, trainLabel, family = "binomial")
+```
+
+
+
+### Previsão do modelo
+```{r}
+logitPred <- predict(logitModel, newx = testMatrix, type = "response")
+logitPred <- ifelse(logitPred > 0.5, 1, 0)
+```
+
+
+### Avaliação da accuracy do modelo
+```{r}
+logitAccuracy <- sum(logitPred == testLabel) / length(testLabel)
+logitAccuracy
+```
+Neste caso o valor da accuracy é 0, o que significa que os valores de testLabel são diferentes de logitPred, isto pode querer dizer que o modelo não está a prever corretamente os dados.
+
+
+## ÁRVORE DE DECISÃO
+```{r}
+trainMatrix <- as.matrix(trainData[, 1:4])
+trainLabel <- trainData$coluna
+
+testMatrix <- as.matrix(testData[, 1:4])
+testLabel <- testData$coluna
+
+dtModel <- rpart(trainLabel ~ ., data = trainData[, 1:4])
+
+dtPred <- predict(dtModel, newdata = testData[, 1:4], type = "class")
+
+dtAccuracy <- sum(dtPred == testLabel) / length(testLabel)
+dtAccuracy
+```
+dtAccuracy apresenta uma accuracy de 0.5.
+
+```{r}
+rpart.plot(dtModel)
+```
+No gráfico é observável 74% de Alive contra 26% de Dead.
+
